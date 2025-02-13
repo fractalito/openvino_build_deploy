@@ -244,11 +244,11 @@ def run(video_path: str, model_paths: Tuple[Path, Path], model_name: str = "", c
 
             # add alert text to the frame if necessary, flash every second
             if mean_customer_count > object_limit and time.time() % 2 > 1:
-                utils.draw_text(frame, text=f"Intel employee required in zone {zone_id}!", point=(20, 20), font_color=(0, 0, 255))
+                utils.draw_text(frame, text=f"People detected in zone {zone_id}. Leave the zone immediately!", point=(20, 20), font_color=(0, 0, 255))
 
             # print an info about number of customers in the queue, ask for the more assistants if required
             log.info(
-                f"Zone {zone_id}, avg {category} count: {mean_customer_count} {'Intel employee required!' if mean_customer_count > object_limit else ''}")
+                f"Zone {zone_id}, avg {category} count: {mean_customer_count} {'Leave the zone immediately!' if mean_customer_count > object_limit else ''}")
 
         # Mean processing time [ms].
         processing_time = np.mean(processing_times) * 1000
@@ -291,14 +291,14 @@ def run(video_path: str, model_paths: Tuple[Path, Path], model_name: str = "", c
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--stream', default="0", type=str, help="Path to a video file or the webcam number")
+    parser.add_argument('--stream', default="8", type=str, help="Path to a video file or the webcam number")
     parser.add_argument("--model_name", type=str, default="yolo11n", help="Model version to be converted",
                         choices=["yolov8n", "yolov8s", "yolov8m", "yolov8l", "yolov8x", "yolov8n-seg", "yolov8s-seg", "yolov8m-seg", "yolov8l-seg", "yolov8x-seg",
                                  "yolo11n", "yolo11s", "yolo11m", "yolo11l", "yolo11x", "yolo11n-seg", "yolo11s-seg", "yolo11m-seg", "yolo11l-seg", "yolo11x-seg"])
     parser.add_argument("--model_dir", type=str, default="model", help="Directory to place the model in")
     parser.add_argument('--category', type=str, default="person", choices=CATEGORIES, help="The category to detect (from COCO dataset)")
     parser.add_argument('--zones_config_file', type=str, default="zones.json", help="Path to the zone config file (json)")
-    parser.add_argument('--object_limit', type=int, default=3, help="The maximum number of objects in the area")
+    parser.add_argument('--object_limit', type=int, default=0, help="The maximum number of objects in the area")
     parser.add_argument("--flip", type=bool, default=True, help="Mirror input video")
     parser.add_argument('--colorful', action="store_true", help="If objects should be annotated with random colors")
 
