@@ -40,9 +40,9 @@ CATEGORIES = [
 def load_yolo_model(model_name: str, device: str) -> YOLO:
     model_path = MODEL_DIR / f"{model_name}.pt"
     model = YOLO(model_path)
-    openvino_model_path = MODEL_DIR / f"{model_name}_openvino_model"
+    openvino_model_path = MODEL_DIR / f"{model_name}_int8_openvino_model"
     if not openvino_model_path.exists():
-        openvino_model_path = model.export(format="openvino", dynamic=False, half=True)
+        openvino_model_path = model.export(format="openvino", dynamic=False, half=True, int8=True, data="coco128.yaml")
 
     model = YOLO(openvino_model_path)
 
