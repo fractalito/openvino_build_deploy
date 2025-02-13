@@ -7,11 +7,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import torch
 from supervision import BoxCornerAnnotator, LabelAnnotator, TraceAnnotator, LineZoneAnnotator, LineZone, ByteTrack, \
     Point, Detections, Color, ColorLookup, DetectionsSmoother
 from supervision.annotators.base import BaseAnnotator
-from ultralytics import YOLOWorld
+from ultralytics import YOLO
 from ultralytics.engine.results import Results
 
 SCRIPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "utils")
@@ -22,20 +21,30 @@ from utils import demo_utils as utils
 MODEL_DIR = Path("model")
 DATA_DIR = Path("data")
 
-MAIN_CLASS = "hazelnut"
-AUX_CLASSES = ["nut", "brown ball"]
-# the following are "null" classes to improve detection of the main classes
-NULL_CLASSES = ["person", "hand", "finger", "fabric"]
+MAIN_CLASS = "apple"
 
 PROBABILITY_COEFFICIENT = 15
 
+CATEGORIES = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+    "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant",
+    "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
+    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
+    "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli",
+    "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed", "dining table", "toilet",
+    "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator",
+    "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
+]
 
-def load_yolo_model(model_name: str, device: str) -> YOLOWorld:
-    model = YOLOWorld(model_name)
-    opts = {"device": device, "config": {"PERFORMANCE_HINT": "LATENCY"}, "model_caching" : True, "cache_dir": "cache"}
-    model = torch.compile(model, backend="openvino", options=opts)
-    # set classes to detect
-    model.set_classes([MAIN_CLASS] + AUX_CLASSES + NULL_CLASSES)
+
+def load_yolo_model(model_name: str, device: str) -> YOLO:
+    model_path = MODEL_DIR / f"{model_name}.pt"
+    model = YOLO(model_path)
+    openvino_model_path = MODEL_DIR / f"{model_name}_openvino_model"
+    if not openvino_model_path.exists():
+        openvino_model_path = model.export(format="openvino", dynamic=False, half=True)
+
+    model = YOLO(openvino_model_path)
 
     return model
 
@@ -78,13 +87,10 @@ def add_box_margin(box: tuple[int], frame_size: tuple[int], margin_ratio: float 
 
 def filter_and_process_results(det_results: Results, tracker: ByteTrack, smoother: DetectionsSmoother, line_zone: LineZone) -> Detections:
     detections = Detections.from_ultralytics(det_results)
-    # we have to increase probabilities, which are very low in case of YOLOWorld to be able to use tracking
-    detections.confidence *= PROBABILITY_COEFFICIENT
 
-    # filter out the null classes
-    detections = detections[np.isin(detections.class_id, np.arange(len(AUX_CLASSES) + 1))]
-    # set the class_id to 0 (MAIN_CLASS) for all detections
-    detections.data["class_name"] = [MAIN_CLASS] * len(detections)
+    # filter out the classes that are not of interest
+    category_id = CATEGORIES.index(MAIN_CLASS)
+    detections = detections[detections.class_id == category_id]
 
     detections = detections.with_nmm(class_agnostic=True)
     detections = tracker.update_with_detections(detections)
@@ -175,9 +181,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--stream', default="0", type=str, help="Path to a video file or the webcam number")
     parser.add_argument('--device', default="AUTO", type=str, help="Device to run inference on")
-    parser.add_argument("--detection_model", type=str, default="yolov8s-worldv2", help="Model for object detection",
-                        choices=["yolov8s-world", "yolov8m-world", "yolov8l-world", "yolov8x-world",
-                                 "yolov8s-worldv2", "yolov8m-worldv2", "yolov8l-worldv2", "yolov8x-worldv2"])
+    parser.add_argument("--detection_model", type=str, default="yolo11n", help="Model for object detection",
+                        choices=["yolov8n", "yolov8s", "yolov8m", "yolov8l", "yolov8x", "yolov8n-seg", "yolov8s-seg", "yolov8m-seg", "yolov8l-seg", "yolov8x-seg",
+                                 "yolo11n", "yolo11s", "yolo11m", "yolo11l", "yolo11x", "yolo11n-seg", "yolo11s-seg", "yolo11m-seg", "yolo11l-seg", "yolo11x-seg"])
     parser.add_argument("--flip", type=bool, default=True, help="Mirror input video")
 
     args = parser.parse_args()
