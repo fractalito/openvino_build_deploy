@@ -1,7 +1,9 @@
 name: Build and Upload Executable
 
 on:
-  workflow_dispatch:
+    pull_request:
+      branches:
+        - eli-dev
 
 jobs:
   build-and-upload:
