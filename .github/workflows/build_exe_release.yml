@@ -1,7 +1,9 @@
 name: Build and Release Executable
 
 on:
-  workflow_dispatch:
+    pull_request:
+      branches:
+        - eli-dev
 
 jobs:
   build-and-release:
