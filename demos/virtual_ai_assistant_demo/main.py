@@ -24,7 +24,11 @@ from llama_index.vector_stores.faiss import FaissVectorStore
 from openvino.runtime import opset10 as ops
 from openvino.runtime import passes
 from optimum.intel import OVModelForCausalLM, OVModelForFeatureExtraction, OVWeightQuantizationConfig, OVConfig, OVQuantizer, OVModelForSequenceClassification
-from transformers import AutoTokenizer
+from optimum.intel.openvino import OVModelForVisualCausalLM
+from PIL import Image
+from transformers import AutoProcessor, AutoTokenizer
+from qwen_vl_utils import process_vision_info
+from transformers import TextStreamer, pipeline
 # it must be imported as the last one; otherwise, it causes a crash on macOS
 import faiss
 
@@ -37,6 +41,7 @@ ov_llm: Optional[OpenVINOLLM] = None
 ov_embedding: Optional[OpenVINOEmbedding] = None
 ov_reranker: Optional[OpenVINORerank] = None
 ov_chat_engine: Optional[BaseChatEngine] = None
+ov_vlm: Optional[OVModelForVisualCausalLM] = None
 
 chatbot_config = {}
 
@@ -138,8 +143,32 @@ def load_reranker_model(model_name: str) -> OpenVINORerank:
     return OpenVINORerank(model_id_or_path=str(model_path), device="CPU", top_n=3)
 
 
-def load_chat_models(chat_model_name: str, embedding_model_name: str, reranker_model_name: str, personality_file_path: Path, auth_token: str = None) -> None:
-    global ov_llm, ov_chat_engine, ov_embedding, chatbot_config, ov_reranker
+def load_vlm_model(model_name: str):
+    model_path = MODEL_DIR / model_name
+    model_dir = model_path
+
+    if not model_path.exists():
+        vlm_model = OVModelForVisualCausalLM.from_pretrained(model_name, export=True, compile=False)
+        vlm_model.save_pretrained(model_path)
+        vlm_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        vlm_tokenizer.save_pretrained(model_path)
+        min_pixels = 256 * 28 * 28
+        max_pixels = 1280 * 28 * 28
+        vlm_processor = AutoProcessor.from_pretrained(model_name, min_pixels=min_pixels, max_pixels=max_pixels)
+        vlm_processor.save_pretrained(model_path)
+
+    vlm_model = OVModelForVisualCausalLM.from_pretrained(model_path)
+    vlm_tokenizer = AutoTokenizer.from_pretrained(model_path)
+    vlm_processor = AutoProcessor.from_pretrained(model_path)
+
+    if vlm_processor.chat_template is None:
+        vlm_processor.chat_template = vlm_tokenizer.chat_template
+
+    return vlm_model, vlm_processor, vlm_tokenizer
+
+
+def load_chat_models(chat_model_name: str, embedding_model_name: str, reranker_model_name: str, vlm_model_name: str, personality_file_path: Path, auth_token: str = None) -> None:
+    global ov_llm, ov_chat_engine, ov_embedding, chatbot_config, ov_reranker, ov_vlm
 
     with open(personality_file_path, "rb") as f:
         chatbot_config = yaml.safe_load(f)
@@ -150,6 +179,9 @@ def load_chat_models(chat_model_name: str, embedding_model_name: str, reranker_m
     log.info(f"Running {embedding_model_name} on {ov_embedding._model.request.get_property('EXECUTION_DEVICES')}")   
     ov_reranker = load_reranker_model(reranker_model_name)
     log.info(f"Running {reranker_model_name} on {','.join(ov_reranker._model.request.get_property('EXECUTION_DEVICES'))}")
+    ov_vlm, processor, pipeline = load_vlm_model(vlm_model_name)
+    log.info(f"Running {vlm_model_name} on {type(ov_vlm)}")
+    # test_vlm_model(ov_vlm, processor, pipeline)
 
     ov_chat_engine = SimpleChatEngine.from_defaults(llm=ov_llm, system_prompt=chatbot_config["system_configuration"],
                                                     memory=ChatMemoryBuffer.from_defaults())
@@ -311,11 +343,11 @@ def create_UI(initial_message: str, action_name: str) -> gr.Blocks:
         return demo
 
 
-def run(chat_model_name: str, embedding_model_name: str, reranker_model_name: str, personality_file_path: Path, hf_token: str = None, local_network: bool = False, public_interface: bool = False) -> None:
+def run(chat_model_name: str, embedding_model_name: str, reranker_model_name: str, vlm_model_name: str, personality_file_path: Path, hf_token: str = None, local_network: bool = False, public_interface: bool = False) -> None:
     server_name = "0.0.0.0" if local_network else None
 
     # load chat models
-    load_chat_models(chat_model_name, embedding_model_name, reranker_model_name, personality_file_path, hf_token)
+    load_chat_models(chat_model_name, embedding_model_name, reranker_model_name, vlm_model_name, personality_file_path, hf_token)
 
     # get initial greeting
     initial_message = generate_initial_greeting()
@@ -335,10 +367,11 @@ if __name__ == "__main__":
     parser.add_argument("--chat_model", type=str, default="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", help="Path/name of the chat model")
     parser.add_argument("--embedding_model", type=str, default="BAAI/bge-small-en-v1.5", help="Path/name of the model for embeddings")
     parser.add_argument("--reranker_model", type=str, default="BAAI/bge-reranker-base", help="Path/name of the reranker model")
+    parser.add_argument("--vlm_model", type=str, default="Qwen/Qwen2.5-VL-3B-Instruct", help="Path/name of the VLM model")
     parser.add_argument("--personality", type=str, default="healthcare_personality.yaml", help="Path to the YAML file with chatbot personality")
     parser.add_argument("--hf_token", type=str, help="HuggingFace access token to get Llama3")
     parser.add_argument("--public", default=False, action="store_true", help="Whether interface should be available publicly")
     parser.add_argument("--local_network", action="store_true", help="Whether demo should be available in local network")
 
     args = parser.parse_args()
-    run(args.chat_model, args.embedding_model, args.reranker_model, Path(args.personality), args.hf_token, args.local_network, args.public)
+    run(args.chat_model, args.embedding_model, args.reranker_model, args.vlm_model, Path(args.personality), args.hf_token, args.local_network, args.public)
