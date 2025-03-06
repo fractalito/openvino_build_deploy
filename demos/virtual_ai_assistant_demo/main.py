@@ -242,6 +242,13 @@ def load_context(file_paths: List[str]) -> None:
                                           memory=memory, node_postprocessors=[ov_reranker])
 
 
+def load_image(image) -> str:
+    image = Image.fromarray(image)
+    image.save('latest.png')
+    image_md = f"![image](./latest.png)"
+    return image_md
+
+
 # this is necessary for thinking models e.g. deepseek
 def emphasize_thinking_mode(token: str) -> str:
     return token + "<em><small>" if "<think>" in token else "</small></em>" + token if "</think>" in token else token
@@ -298,7 +305,9 @@ def create_UI(initial_message: str, action_name: str) -> gr.Blocks:
         gr.Markdown(chatbot_config["instructions"])
 
         with gr.Row():
-            file_uploader_ui = gr.Files(label="Additional context", file_types=[".pdf", ".txt"], scale=1)
+            with gr.Column(scale=2):
+                file_uploader_ui = gr.Files(label="Additional context", file_types=[".pdf", ".txt"], scale=1)
+                image_input_ui = gr.Image(label="Input image", scale=1)
             with gr.Column(scale=4):
                 chatbot_ui = gr.Chatbot(value=[[None, initial_message]], label="Chatbot", sanitize_html=False)
                 with gr.Row():
@@ -318,6 +327,11 @@ def create_UI(initial_message: str, action_name: str) -> gr.Blocks:
 
         file_uploader_ui.change(lambda: ([[None, initial_message]], None), outputs=[chatbot_ui, summary_ui]) \
             .then(load_context, inputs=file_uploader_ui)
+        
+        image_md = gr.Markdown("")
+        image_input_ui.change(lambda: gr.Button(interactive=False), outputs=submit_btn) \
+            .then(load_image, inputs=image_input_ui, outputs=image_md) \
+            .then(lambda: gr.Button(interactive=True), outputs=submit_btn)
 
         clear_btn.click(lambda: ([[None, initial_message]], None, None), outputs=[chatbot_ui, summary_ui, tps_text_ui]) \
             .then(load_context, inputs=file_uploader_ui) \
@@ -327,6 +341,7 @@ def create_UI(initial_message: str, action_name: str) -> gr.Blocks:
         gr.on(triggers=[submit_btn.click, input_text_ui.submit], fn=lambda: gr.Button(interactive=False), outputs=submit_btn) \
             .then(lambda: gr.Button(interactive=False), outputs=extra_action_button) \
             .then(lambda: gr.Button(interactive=False), outputs=clear_btn) \
+            .then(transcribe, inputs=[image_md, chatbot_ui], outputs=chatbot_ui) \
             .then(transcribe, inputs=[input_text_ui, chatbot_ui], outputs=chatbot_ui) \
             .then(lambda: None, outputs=input_text_ui) \
             .then(chat, inputs=chatbot_ui, outputs=[chatbot_ui, tps_text_ui]) \
