@@ -21,7 +21,7 @@ torchvision
 qwen-vl-utils
 Pillow
 
-transformers==4.49.0
+transformers>=4.49
 pymupdf==1.24.10
 pyyaml==6.0.1
 
