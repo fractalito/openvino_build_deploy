@@ -1,5 +1,8 @@
 FROM python:3.10-slim
 
+# Install git
+RUN apt-get update && apt-get install -y git && apt-get clean
+
 # Install the python requirements
 COPY ./requirements.txt .
 RUN python -m pip install --upgrade pip

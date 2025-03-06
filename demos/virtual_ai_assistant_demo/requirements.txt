@@ -21,7 +21,6 @@ torchvision
 qwen-vl-utils
 Pillow
 
-git+https://github.com/huggingface/optimum-intel.git
 transformers==4.49.0
 pymupdf==1.24.10
 pyyaml==6.0.1
