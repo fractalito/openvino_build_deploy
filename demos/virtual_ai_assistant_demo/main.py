@@ -250,6 +250,12 @@ def load_image(image) -> str:
     return image_md
 
 
+def image_to_grayscale(image: np.ndarray) -> np.ndarray:
+    image = Image.fromarray(image)
+    image = image.convert("L")
+    return np.array(image)
+
+
 # this is necessary for thinking models e.g. deepseek
 def emphasize_thinking_mode(token: str) -> str:
     return token + "<em><small>" if "<think>" in token else "</small></em>" + token if "</think>" in token else token
@@ -265,10 +271,10 @@ def generate_initial_greeting() -> str:
 def chat(history: List[List[str]], image) -> Tuple[List[List[str]], float]:
     if image is not None:
         log.info("Using VLM inference")
-        yield **vlm_chat(history, image)
+        yield list(vlm_chat(history, image))
     else :
         log.info("Using LLM inference")
-        yield **llm_chat(history)
+        yield list(llm_chat(history))
 
 
 def llm_chat(history: List[List[str]]) -> Tuple[List[List[str]], float]:
@@ -320,24 +326,21 @@ def vlm_chat(history: List[List[str]], image):
             ],
         }
     ]
-    log.info(message)
 
     text = processor.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
-    log.info(text)
     image_inputs, video_inputs = process_vision_info(message)
     inputs = processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt").to(model.device)
         
     tokenizer = processor.tokenizer
-    streamer = TextIteratorStreamer(tokenize, skip_prompt=True, skip_special_tokens=True)
+    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     gen_kwargs = {"max_new_tokens": 100, "streamer": streamer, **inputs}
-    log.info("Running with gen arguments", gen_kwargs)
 
     thread = threading.Thread(target=model.generate, kwargs=gen_kwargs)
     thread.start()
 
     # generate first token independently
     first_token = next(streamer)
-    history[-1][1] += emphasize_thinking_mode(first_token)
+    history[-1][1] = emphasize_thinking_mode(first_token)
     yield history, 0.0
 
     # generate next tokens
@@ -347,7 +350,6 @@ def vlm_chat(history: List[List[str]], image):
         history[-1][1] += emphasize_thinking_mode(partial_text)
         processing_time = time.time() - start_time
         tokens += 1
-        log.info(tokens)
         # "return" partial response
         yield history, round(tokens / processing_time, 2)
 
@@ -415,9 +417,8 @@ def create_UI(initial_message: str, action_name: str) -> gr.Blocks:
             .then(transcribe, inputs=[input_text_ui, chatbot_ui], outputs=chatbot_ui) \
             .then(lambda: None, outputs=input_text_ui) \
             .then(chat, inputs=[chatbot_ui, image_md], outputs=[chatbot_ui, tps_text_ui]) \
-            .then(vlm_chat, inputs=[chatbot_ui, image_md], outputs=[chatbot_ui, tps_lvm_ui]) \
+            .then(image_to_grayscale, input=image_input_ui, outputs=image_input_ui) \
             .then(lambda: None, outputs=image_md) \
-            .then(lambda:  np.zeros((100, 100, 3), dtype=np.uint8) , outputs=image_input_ui) \
             .then(lambda: gr.Button(interactive=True), outputs=clear_btn) \
             .then(lambda: gr.Button(interactive=True), outputs=extra_action_button)
 
