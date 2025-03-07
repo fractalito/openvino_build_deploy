@@ -26,7 +26,7 @@ from openvino.runtime import passes
 from optimum.intel import OVModelForCausalLM, OVModelForFeatureExtraction, OVWeightQuantizationConfig, OVConfig, OVQuantizer, OVModelForSequenceClassification
 from optimum.intel.openvino import OVModelForVisualCausalLM
 from PIL import Image
-from transformers import AutoProcessor, AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer, TextIteratorStreamer
 from qwen_vl_utils import process_vision_info
 from transformers import TextStreamer, pipeline
 # it must be imported as the last one; otherwise, it causes a crash on macOS
@@ -42,6 +42,7 @@ ov_embedding: Optional[OpenVINOEmbedding] = None
 ov_reranker: Optional[OpenVINORerank] = None
 ov_chat_engine: Optional[BaseChatEngine] = None
 ov_vlm: Optional[OVModelForVisualCausalLM] = None
+ov_vlm_processor: Optional[AutoProcessor] = None
 
 chatbot_config = {}
 
@@ -168,7 +169,7 @@ def load_vlm_model(model_name: str):
 
 
 def load_chat_models(chat_model_name: str, embedding_model_name: str, reranker_model_name: str, vlm_model_name: str, personality_file_path: Path, auth_token: str = None) -> None:
-    global ov_llm, ov_chat_engine, ov_embedding, chatbot_config, ov_reranker, ov_vlm
+    global ov_llm, ov_chat_engine, ov_embedding, chatbot_config, ov_reranker, ov_vlm, ov_vlm_processor
 
     with open(personality_file_path, "rb") as f:
         chatbot_config = yaml.safe_load(f)
@@ -179,8 +180,8 @@ def load_chat_models(chat_model_name: str, embedding_model_name: str, reranker_m
     log.info(f"Running {embedding_model_name} on {ov_embedding._model.request.get_property('EXECUTION_DEVICES')}")   
     ov_reranker = load_reranker_model(reranker_model_name)
     log.info(f"Running {reranker_model_name} on {','.join(ov_reranker._model.request.get_property('EXECUTION_DEVICES'))}")
-    ov_vlm, processor, pipeline = load_vlm_model(vlm_model_name)
-    log.info(f"Running {vlm_model_name} on {type(ov_vlm)}")
+    ov_vlm, ov_vlm_processor, pipeline = load_vlm_model(vlm_model_name)
+    log.info(f"Running {vlm_model_name} on {ov_vlm.device}")
     # test_vlm_model(ov_vlm, processor, pipeline)
 
     ov_chat_engine = SimpleChatEngine.from_defaults(llm=ov_llm, system_prompt=chatbot_config["system_configuration"],
@@ -261,7 +262,16 @@ def generate_initial_greeting() -> str:
     return response
 
 
-def chat(history: List[List[str]]) -> Tuple[List[List[str]], float]:
+def chat(history: List[List[str]], image) -> Tuple[List[List[str]], float]:
+    if image is not None:
+        log.info("Using VLM inference")
+        yield **vlm_chat(history, image)
+    else :
+        log.info("Using LLM inference")
+        yield **llm_chat(history)
+
+
+def llm_chat(history: List[List[str]]) -> Tuple[List[List[str]], float]:
     # get token by token and merge to the final response
     history[-1][1] = ""
     with inference_lock:
@@ -287,6 +297,65 @@ def chat(history: List[List[str]]) -> Tuple[List[List[str]], float]:
         processing_time = end_time - start_time
         log.info(f"Chat model response time: {processing_time:.2f} seconds ({tokens / processing_time:.2f} tokens/s)")
         yield history, round(tokens / processing_time, 2)
+
+
+def vlm_chat(history: List[List[str]], image):
+    model, processor = ov_vlm, ov_vlm_processor
+
+    image_path = Path("demo.jpeg")
+
+    if not image_path.exists():
+        log.warning("Image {image_path} does not exist.")
+        return history, None
+            
+    message = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "image": f"file://{image_path}",
+                },
+                {"type": "text", "text": history[-1][0]},
+            ],
+        }
+    ]
+    log.info(message)
+
+    text = processor.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
+    log.info(text)
+    image_inputs, video_inputs = process_vision_info(message)
+    inputs = processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt").to(model.device)
+        
+    tokenizer = processor.tokenizer
+    streamer = TextIteratorStreamer(tokenize, skip_prompt=True, skip_special_tokens=True)
+    gen_kwargs = {"max_new_tokens": 100, "streamer": streamer, **inputs}
+    log.info("Running with gen arguments", gen_kwargs)
+
+    thread = threading.Thread(target=model.generate, kwargs=gen_kwargs)
+    thread.start()
+
+    # generate first token independently
+    first_token = next(streamer)
+    history[-1][1] += emphasize_thinking_mode(first_token)
+    yield history, 0.0
+
+    # generate next tokens
+    tokens = 1
+    start_time = time.time()
+    for partial_text in streamer:
+        history[-1][1] += emphasize_thinking_mode(partial_text)
+        processing_time = time.time() - start_time
+        tokens += 1
+        log.info(tokens)
+        # "return" partial response
+        yield history, round(tokens / processing_time, 2)
+
+    end_time = time.time()
+
+    processing_time = end_time - start_time
+    log.info(f"VLM chat model response time: {processing_time:.2f} seconds ({tokens / processing_time:.2f} tokens/s)")
+    yield history, round(tokens / processing_time, 2)
 
 
 def transcribe(prompt: str, conversation: List[List[str]]) -> List[List[str]]:
@@ -315,6 +384,7 @@ def create_UI(initial_message: str, action_name: str) -> gr.Blocks:
                     submit_btn = gr.Button("Submit", variant="primary", interactive=False, scale=1)
                 with gr.Row():
                     tps_text_ui = gr.Text("", label="Performance (tokens/s)", type="text", scale=6)
+                    tps_lvm_ui = gr.Text("", label="VLM Performance (tokens/s)", type="text", scale=6)
                     with gr.Column(scale=1):
                         clear_btn = gr.Button("Start over", variant="secondary")
                         extra_action_button = gr.Button(action_name, variant="primary", interactive=False)
@@ -328,7 +398,7 @@ def create_UI(initial_message: str, action_name: str) -> gr.Blocks:
         file_uploader_ui.change(lambda: ([[None, initial_message]], None), outputs=[chatbot_ui, summary_ui]) \
             .then(load_context, inputs=file_uploader_ui)
         
-        image_md = gr.Markdown("")
+        image_md = gr.Markdown(None)
         image_input_ui.change(lambda: gr.Button(interactive=False), outputs=submit_btn) \
             .then(load_image, inputs=image_input_ui, outputs=image_md) \
             .then(lambda: gr.Button(interactive=True), outputs=submit_btn)
@@ -344,7 +414,10 @@ def create_UI(initial_message: str, action_name: str) -> gr.Blocks:
             .then(transcribe, inputs=[image_md, chatbot_ui], outputs=chatbot_ui) \
             .then(transcribe, inputs=[input_text_ui, chatbot_ui], outputs=chatbot_ui) \
             .then(lambda: None, outputs=input_text_ui) \
-            .then(chat, inputs=chatbot_ui, outputs=[chatbot_ui, tps_text_ui]) \
+            .then(chat, inputs=[chatbot_ui, image_md], outputs=[chatbot_ui, tps_text_ui]) \
+            .then(vlm_chat, inputs=[chatbot_ui, image_md], outputs=[chatbot_ui, tps_lvm_ui]) \
+            .then(lambda: None, outputs=image_md) \
+            .then(lambda:  np.zeros((100, 100, 3), dtype=np.uint8) , outputs=image_input_ui) \
             .then(lambda: gr.Button(interactive=True), outputs=clear_btn) \
             .then(lambda: gr.Button(interactive=True), outputs=extra_action_button)
 
