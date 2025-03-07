@@ -43,6 +43,7 @@ ov_reranker: Optional[OpenVINORerank] = None
 ov_chat_engine: Optional[BaseChatEngine] = None
 ov_vlm: Optional[OVModelForVisualCausalLM] = None
 ov_vlm_processor: Optional[AutoProcessor] = None
+current_model = "llm"
 
 chatbot_config = {}
 
@@ -244,6 +245,8 @@ def load_context(file_paths: List[str]) -> None:
 
 
 def load_image(image) -> str:
+    global current_model
+    current_model = "vlm"
     image = Image.fromarray(image)
     image.save('latest.png')
     image_md = f"![image](./latest.png)"
@@ -251,6 +254,8 @@ def load_image(image) -> str:
 
 
 def image_to_grayscale(image: np.ndarray) -> np.ndarray:
+    global current_model
+    current_model = "llm"
     image = Image.fromarray(image)
     image = image.convert("L")
     return np.array(image)
@@ -269,12 +274,13 @@ def generate_initial_greeting() -> str:
 
 
 def chat(history: List[List[str]], image) -> Tuple[List[List[str]], float]:
-    if image is not None:
-        log.info("Using VLM inference")
-        yield list(vlm_chat(history, image))
-    else :
+    global current_model
+    if current_model == "llm":
         log.info("Using LLM inference")
-        yield list(llm_chat(history))
+        yield list(llm_chat(history))[-1]
+    else :
+        log.info(f"Using VLM inference with image {image}")
+        yield list(vlm_chat(history, image))[-1]
 
 
 def llm_chat(history: List[List[str]]) -> Tuple[List[List[str]], float]:
@@ -305,13 +311,12 @@ def llm_chat(history: List[List[str]]) -> Tuple[List[List[str]], float]:
         yield history, round(tokens / processing_time, 2)
 
 
-def vlm_chat(history: List[List[str]], image):
+def vlm_chat(history: List[List[str]], image) -> Tuple[List[List[str]], float]:
     model, processor = ov_vlm, ov_vlm_processor
 
-    image_path = Path("demo.jpeg")
-
+    image_path = Path("latest.png")
     if not image_path.exists():
-        log.warning("Image {image_path} does not exist.")
+        log.warning(f"Image {image_path} does not exist.")
         return history, None
             
     message = [
@@ -351,13 +356,12 @@ def vlm_chat(history: List[List[str]], image):
         processing_time = time.time() - start_time
         tokens += 1
         # "return" partial response
-        yield history, round(tokens / processing_time, 2)
+        yield history, round(float(tokens) / processing_time, 2)
 
     end_time = time.time()
-
     processing_time = end_time - start_time
     log.info(f"VLM chat model response time: {processing_time:.2f} seconds ({tokens / processing_time:.2f} tokens/s)")
-    yield history, round(tokens / processing_time, 2)
+    yield history, round(float(tokens) / processing_time, 2)
 
 
 def transcribe(prompt: str, conversation: List[List[str]]) -> List[List[str]]:
@@ -386,7 +390,6 @@ def create_UI(initial_message: str, action_name: str) -> gr.Blocks:
                     submit_btn = gr.Button("Submit", variant="primary", interactive=False, scale=1)
                 with gr.Row():
                     tps_text_ui = gr.Text("", label="Performance (tokens/s)", type="text", scale=6)
-                    tps_lvm_ui = gr.Text("", label="VLM Performance (tokens/s)", type="text", scale=6)
                     with gr.Column(scale=1):
                         clear_btn = gr.Button("Start over", variant="secondary")
                         extra_action_button = gr.Button(action_name, variant="primary", interactive=False)
@@ -403,11 +406,13 @@ def create_UI(initial_message: str, action_name: str) -> gr.Blocks:
         image_md = gr.Markdown(None)
         image_input_ui.change(lambda: gr.Button(interactive=False), outputs=submit_btn) \
             .then(load_image, inputs=image_input_ui, outputs=image_md) \
-            .then(lambda: gr.Button(interactive=True), outputs=submit_btn)
+            .then(lambda: gr.Button(interactive=True), outputs=submit_btn) \
+            .then(lambda: None, outputs=image_md)
 
         clear_btn.click(lambda: ([[None, initial_message]], None, None), outputs=[chatbot_ui, summary_ui, tps_text_ui]) \
             .then(load_context, inputs=file_uploader_ui) \
-            .then(lambda: gr.Button(interactive=False), outputs=extra_action_button)
+            .then(lambda: gr.Button(interactive=False), outputs=extra_action_button) \
+            .then(lambda: None, outputs=image_md)
 
         # block buttons, do the transcription and conversation, clear audio, unblock buttons
         gr.on(triggers=[submit_btn.click, input_text_ui.submit], fn=lambda: gr.Button(interactive=False), outputs=submit_btn) \
@@ -417,7 +422,7 @@ def create_UI(initial_message: str, action_name: str) -> gr.Blocks:
             .then(transcribe, inputs=[input_text_ui, chatbot_ui], outputs=chatbot_ui) \
             .then(lambda: None, outputs=input_text_ui) \
             .then(chat, inputs=[chatbot_ui, image_md], outputs=[chatbot_ui, tps_text_ui]) \
-            .then(image_to_grayscale, input=image_input_ui, outputs=image_input_ui) \
+            .then(image_to_grayscale, inputs=image_input_ui, outputs=image_input_ui) \
             .then(lambda: None, outputs=image_md) \
             .then(lambda: gr.Button(interactive=True), outputs=clear_btn) \
             .then(lambda: gr.Button(interactive=True), outputs=extra_action_button)
